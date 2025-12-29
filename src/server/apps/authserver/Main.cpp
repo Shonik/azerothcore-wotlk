@@ -41,6 +41,7 @@
 #include "SharedDefines.h"
 #include "SteadyTimer.h"
 #include "Util.h"
+#include "PatchMgr.h"
 #include <boost/asio/signal_set.hpp>
 #include <boost/program_options.hpp>
 #include <boost/version.hpp>
@@ -63,6 +64,7 @@ void StopDB();
 void SignalHandler(std::weak_ptr<Acore::Asio::IoContext> ioContextRef, boost::system::error_code const& error, int signalNumber);
 void KeepDatabaseAliveHandler(std::weak_ptr<boost::asio::steady_timer> dbPingTimerRef, int32 dbPingInterval, boost::system::error_code const& error);
 void BanExpiryHandler(std::weak_ptr<boost::asio::steady_timer> banExpiryCheckTimerRef, int32 banExpiryCheckInterval, boost::system::error_code const& error);
+void PatchJobsHandler(std::weak_ptr<boost::asio::steady_timer> patchJobsTimerRef, int32 patchJobsInterval, boost::system::error_code const& error);
 variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile);
 
 /// Launch the auth server
@@ -127,6 +129,9 @@ int main(int argc, char** argv)
     // Load IP Location Database
     sIPLocation->Load();
 
+    // Initialize Patch Manager
+    sPatchMgr->Initialize();
+
     std::shared_ptr<void> dbHandle(nullptr, [](void*) { StopDB(); });
 
     std::shared_ptr<Acore::Asio::IoContext> ioContext = std::make_shared<Acore::Asio::IoContext>();
@@ -190,9 +195,21 @@ int main(int argc, char** argv)
     banExpiryCheckTimer->expires_at(Acore::Asio::SteadyTimer::GetExpirationTime(banExpiryCheckInterval));
     banExpiryCheckTimer->async_wait(std::bind(&BanExpiryHandler, std::weak_ptr<boost::asio::steady_timer>(banExpiryCheckTimer), banExpiryCheckInterval, std::placeholders::_1));
 
+    // Enabled a timed callback for handling patch job updates
+    int32 patchJobsInterval = sConfigMgr->GetOption<int32>("Patching.UpdateInterval", 10); // milliseconds
+    if (patchJobsInterval < 1)
+        patchJobsInterval = 1;
+    if (patchJobsInterval > 1000)
+        patchJobsInterval = 1000;
+    std::shared_ptr<boost::asio::steady_timer> patchJobsTimer = std::make_shared<boost::asio::steady_timer>(*ioContext);
+
+    patchJobsTimer->expires_at(std::chrono::steady_clock::now() + std::chrono::milliseconds(patchJobsInterval));
+    patchJobsTimer->async_wait(std::bind(&PatchJobsHandler, std::weak_ptr<boost::asio::steady_timer>(patchJobsTimer), patchJobsInterval, std::placeholders::_1));
+
     // Start the io service worker loop
     ioContext->run();
 
+    patchJobsTimer->cancel();
     banExpiryCheckTimer->cancel();
     dbPingTimer->cancel();
 
@@ -267,6 +284,21 @@ void BanExpiryHandler(std::weak_ptr<boost::asio::steady_timer> banExpiryCheckTim
 
             banExpiryCheckTimer->expires_at(Acore::Asio::SteadyTimer::GetExpirationTime(banExpiryCheckInterval));
             banExpiryCheckTimer->async_wait(std::bind(&BanExpiryHandler, banExpiryCheckTimerRef, banExpiryCheckInterval, std::placeholders::_1));
+        }
+    }
+}
+
+void PatchJobsHandler(std::weak_ptr<boost::asio::steady_timer> patchJobsTimerRef, int32 patchJobsInterval, boost::system::error_code const& error)
+{
+    if (!error)
+    {
+        if (std::shared_ptr<boost::asio::steady_timer> patchJobsTimer = patchJobsTimerRef.lock())
+        {
+            // Update patch transfer jobs
+            sPatchMgr->UpdateJobs();
+
+            patchJobsTimer->expires_at(std::chrono::steady_clock::now() + std::chrono::milliseconds(patchJobsInterval));
+            patchJobsTimer->async_wait(std::bind(&PatchJobsHandler, patchJobsTimerRef, patchJobsInterval, std::placeholders::_1));
         }
     }
 }

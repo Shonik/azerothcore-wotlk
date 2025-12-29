@@ -33,6 +33,7 @@ using boost::asio::ip::tcp;
 
 class Field;
 struct AuthHandler;
+struct PatchInfo;
 
 enum AuthStatus
 {
@@ -41,6 +42,7 @@ enum AuthStatus
     STATUS_RECONNECT_PROOF,
     STATUS_AUTHED,
     STATUS_WAITING_FOR_REALM_LIST,
+    STATUS_XFER,                    // Waiting for XFER commands during patch transfer
     STATUS_CLOSED
 };
 
@@ -68,6 +70,7 @@ public:
     static std::unordered_map<uint8, AuthHandler> InitHandlers();
 
     AuthSession(tcp::socket&& socket);
+    ~AuthSession();
 
     void Start() override;
     bool Update() override;
@@ -84,12 +87,20 @@ private:
     bool HandleReconnectProof();
     bool HandleRealmList();
 
+    // XFER handlers for patch transfer
+    bool HandleXferAccept();
+    bool HandleXferResume();
+    bool HandleXferCancel();
+
     void CheckIpCallback(PreparedQueryResult result);
     void LogonChallengeCallback(PreparedQueryResult result);
     void ReconnectChallengeCallback(PreparedQueryResult result);
     void RealmListCallback(PreparedQueryResult result);
 
     bool VerifyVersion(uint8 const* a, int32 aLength, Acore::Crypto::SHA1::Digest const& versionProof, bool isReconnect);
+
+    // Check if client needs patching and initiate if needed
+    bool CheckAndInitiatePatch();
 
     Optional<Acore::Crypto::SRP6> _srp6;
     SessionKey _sessionKey = {};
@@ -103,6 +114,9 @@ private:
     std::string _ipCountry;
     uint16 _build;
     uint8 _expversion;
+
+    // Patch transfer state
+    PatchInfo* _pendingPatch = nullptr;
 
     QueryCallbackProcessor _queryProcessor;
 };

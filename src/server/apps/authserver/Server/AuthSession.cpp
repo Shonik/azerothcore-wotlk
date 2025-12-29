@@ -30,6 +30,7 @@
 #include "StringConvert.h"
 #include "TOTP.h"
 #include "Util.h"
+#include "PatchMgr.h"
 #include <boost/lexical_cast.hpp>
 
 using boost::asio::ip::tcp;
@@ -129,6 +130,11 @@ std::unordered_map<uint8, AuthHandler> AuthSession::InitHandlers()
     handlers[AUTH_RECONNECT_PROOF] =        { STATUS_RECONNECT_PROOF,   sizeof(AUTH_RECONNECT_PROOF_C),    &AuthSession::HandleReconnectProof };
     handlers[REALM_LIST] =                  { STATUS_AUTHED,            REALM_LIST_PACKET_SIZE,            &AuthSession::HandleRealmList };
 
+    // XFER handlers for patch transfer
+    handlers[XFER_ACCEPT] =                 { STATUS_XFER,              1,                                 &AuthSession::HandleXferAccept };
+    handlers[XFER_RESUME] =                 { STATUS_XFER,              9,                                 &AuthSession::HandleXferResume };
+    handlers[XFER_CANCEL] =                 { STATUS_XFER,              1,                                 &AuthSession::HandleXferCancel };
+
     return handlers;
 }
 
@@ -164,6 +170,16 @@ void AccountInfo::LoadResult(Field* fields)
 
 AuthSession::AuthSession(tcp::socket&& socket) :
     Socket(std::move(socket)), _status(STATUS_CHALLENGE), _build(0), _expversion(0) { }
+
+AuthSession::~AuthSession()
+{
+    // Clean up any pending patch transfer
+    if (_pendingPatch)
+    {
+        sPatchMgr->HandleXferCancel(this);
+        _pendingPatch = nullptr;
+    }
+}
 
 void AuthSession::Start()
 {
@@ -464,8 +480,7 @@ bool AuthSession::HandleLogonProof()
     // If the client has no valid version
     if (_expversion == NO_VALID_EXP_FLAG)
     {
-        // Check if we have the appropriate patch on the disk
-        LOG_DEBUG("network", "Client with invalid version, patching is not implemented");
+        LOG_DEBUG("network", "Client with invalid version");
         return false;
     }
 
@@ -509,6 +524,13 @@ bool AuthSession::HandleLogonProof()
         }
 
         LOG_DEBUG("server.authserver", "'{}:{}' User '{}' successfully authenticated", GetRemoteIpAddress().to_string(), GetRemotePort(), _accountInfo.Login);
+
+        // Check if client needs patching (build below minimum)
+        if (CheckAndInitiatePatch())
+        {
+            LOG_INFO("server.authserver", "Client build {} requires patching, transfer initiated", _build);
+            return true; // Patch transfer initiated, keep connection open
+        }
 
         // Update the sessionkey, last_ip, last login time and reset number of failed logins in the account table for this account
         // No SQL injection (escaped user name) and IP address as received by socket
@@ -754,7 +776,8 @@ void AuthSession::RealmListCallback(PreparedQueryResult result)
     for (auto const& [realmHandle, realm] : sRealmList->GetRealms())
     {
         // don't work with realms which not compatible with the client
-        bool okBuild = ((_expversion & POST_BC_EXP_FLAG) && realm.Build == _build) || ((_expversion & PRE_BC_EXP_FLAG) && !AuthHelper::IsPreBCAcceptedClientBuild(realm.Build));
+        // Accept clients with build >= realm.Build to allow patched clients to connect
+        bool okBuild = ((_expversion & POST_BC_EXP_FLAG) && _build >= realm.Build) || ((_expversion & PRE_BC_EXP_FLAG) && !AuthHelper::IsPreBCAcceptedClientBuild(realm.Build));
 
         // No SQL injection. id of realm is controlled by the database.
         uint32 flag = realm.Flags;
@@ -848,6 +871,9 @@ bool AuthSession::VerifyVersion(uint8 const* a, int32 aLength, Acore::Crypto::SH
     if (!isReconnect)
     {
         RealmBuildInfo const* buildInfo = sRealmList->GetBuildInfo(_build);
+        // Support patched clients (build incremented by 1)
+        if (!buildInfo)
+            buildInfo = sRealmList->GetBuildInfo(_build - 1);
         if (!buildInfo)
             return false;
 
@@ -871,4 +897,90 @@ bool AuthSession::VerifyVersion(uint8 const* a, int32 aLength, Acore::Crypto::SH
     version.Finalize();
 
     return (versionProof == version.GetDigest());
+}
+
+// ============================================================================
+// XFER Handler Implementations for Client Patching
+// ============================================================================
+
+bool AuthSession::HandleXferAccept()
+{
+    LOG_DEBUG("server.authserver", "Entering HandleXferAccept");
+
+    if (!_pendingPatch)
+    {
+        LOG_WARN("server.authserver", "XFER_ACCEPT received but no pending patch");
+        return false;
+    }
+
+    if (!sPatchMgr->HandleXferAccept(this))
+    {
+        LOG_ERROR("server.authserver", "Failed to handle XFER_ACCEPT");
+        return false;
+    }
+
+    return true;
+}
+
+bool AuthSession::HandleXferResume()
+{
+    LOG_DEBUG("server.authserver", "Entering HandleXferResume");
+
+    if (!_pendingPatch)
+    {
+        LOG_WARN("server.authserver", "XFER_RESUME received but no pending patch");
+        return false;
+    }
+
+    // Read the position from the packet (8 bytes)
+    MessageBuffer& packet = GetReadBuffer();
+    if (packet.GetActiveSize() < 9) // 1 byte cmd + 8 bytes position
+        return false;
+
+    uint64 position = *reinterpret_cast<uint64*>(packet.GetReadPointer() + 1);
+
+    if (!sPatchMgr->HandleXferResume(this, position))
+    {
+        LOG_ERROR("server.authserver", "Failed to handle XFER_RESUME");
+        return false;
+    }
+
+    return true;
+}
+
+bool AuthSession::HandleXferCancel()
+{
+    LOG_DEBUG("server.authserver", "Entering HandleXferCancel");
+
+    sPatchMgr->HandleXferCancel(this);
+    _pendingPatch = nullptr;
+    _status = STATUS_CLOSED;
+
+    return false; // Close the connection
+}
+
+bool AuthSession::CheckAndInitiatePatch()
+{
+    if (!sPatchMgr->IsEnabled())
+        return false;
+
+    // Check if the client build is below minimum
+    if (_build >= sPatchMgr->GetMinBuild())
+        return false;
+
+    // Try to find a patch for this client
+    PatchInfo* patch = sPatchMgr->FindPatchForClient(_build, _localizationName);
+    if (!patch)
+    {
+        LOG_DEBUG("server.authserver", "No patch available for build {} locale {}", _build, _localizationName);
+        return false;
+    }
+
+    LOG_INFO("server.authserver", "Client build {} is below minimum {}, initiating patch transfer",
+        _build, sPatchMgr->GetMinBuild());
+
+    _pendingPatch = patch;
+    _status = STATUS_XFER;
+
+    return sPatchMgr->InitiatePatch(this, patch);
 }

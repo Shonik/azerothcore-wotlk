@@ -1,0 +1,6 @@
+new "y:\ClientPatches\frFR12340.mpq" 16 4096
+add "y:\ClientPatches\frFR12340.mpq" "y:\tools\mpq_build\prepatch.lst" "prepatch.lst"
+add "y:\ClientPatches\frFR12340.mpq" "y:\tools\mpq_build\installer.exe" "installer.exe"
+flush "y:\ClientPatches\frFR12340.mpq"
+close "y:\ClientPatches\frFR12340.mpq"
+exit

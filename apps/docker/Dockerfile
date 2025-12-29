@@ -101,8 +101,10 @@ RUN --mount=type=cache,target=/ccache,sharing=locked \
        -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"          \
        -DCMAKE_C_COMPILER_LAUNCHER="ccache"            \
        -DBoost_USE_STATIC_LIBS="ON"                    \
+       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON              \
     && cmake --build . --config "$CTYPE" -j $(($(nproc) + 1)) \
-    && cmake --install . --config "$CTYPE"
+    && cmake --install . --config "$CTYPE" \
+    && cp /azerothcore/build/compile_commands.json /azerothcore/env/dist/
 
 #############################
 # Base runtime for services #
@@ -124,6 +126,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /azerothcore/env/dist/etc/ /azerothcore/env/ref/etc
+COPY --from=build /azerothcore/env/dist/compile_commands.json /azerothcore/env/dist/compile_commands.json
 
 VOLUME /azerothcore/env/dist/etc
 

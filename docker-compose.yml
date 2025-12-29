@@ -69,6 +69,7 @@ services:
     stdin_open: true
     tty: true
     restart: unless-stopped
+    privileged: true
     env_file:
         ${DOCKER_AC_ENV_FILE:-conf/dist/env.ac}
     environment:
@@ -77,15 +78,25 @@ services:
       AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DOCKER_DB_ROOT_PASSWORD:-password};acore_auth"
       AC_WORLD_DATABASE_INFO: "ac-database;3306;root;${DOCKER_DB_ROOT_PASSWORD:-password};acore_world"
       AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;${DOCKER_DB_ROOT_PASSWORD:-password};acore_characters"
+      AC_ALE_ENABLED: true
+      AC_ALE_TRACE_BACK: false
+      AC_ALE_AUTO_RELOAD: false
+      AC_ALE_BYTECODE_CACHE: true
+      AC_ALE_SCRIPT_PATH: "/azerothcore/lua_scripts"
+      AC_ALE_REQUIRE_PATHS: ""
+      AC_ALE_REQUIRE_CPATHS: ""
+      AC_ALE_AUTO_RELOAD_INTERVAL: 1
+      AC_ALE_PLAYER_ANNOUNCE_RELOAD: true
     ports:
       - ${DOCKER_WORLD_EXTERNAL_PORT:-8085}:8085
-      - ${DOCKER_SOAP_EXTERNAL_PORT:-7878}:7878
+      - ${DOCKER_SOAP_EXTERNAL_PORT:-3725}:3725
     volumes:
       - ${DOCKER_VOL_ETC:-./env/dist/etc}:/azerothcore/env/dist/etc
       # [osxfs optimization]: https://stackoverflow.com/a/63437557/1964544
       - ${DOCKER_VOL_LOGS:-./env/dist/logs}:/azerothcore/env/dist/logs:delegated
       # client data
       - ${DOCKER_VOL_DATA:-ac-client-data}:/azerothcore/env/dist/data/:ro
+      - ./lua_scripts:/azerothcore/lua_scripts:ro
     depends_on:
       ac-database:
         condition: service_healthy

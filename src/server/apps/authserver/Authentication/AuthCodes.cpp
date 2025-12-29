@@ -29,11 +29,27 @@ namespace AuthHelper
 
     bool IsPostBCAcceptedClientBuild(uint32 build)
     {
-        return build > MAX_PRE_BC_CLIENT_BUILD && sRealmList->GetBuildInfo(build);
+        // Accept exact match or patched clients (build >= known build)
+        if (build > MAX_PRE_BC_CLIENT_BUILD)
+        {
+            if (sRealmList->GetBuildInfo(build))
+                return true;
+            // Accept patched clients: if build is slightly higher than a known build
+            // This allows clients patched from 12340 to 12341+ to connect
+            if (sRealmList->GetBuildInfo(build - 1))
+                return true;
+        }
+        return false;
     }
 
     bool IsAcceptedClientBuild(uint32 build)
     {
-        return sRealmList->GetBuildInfo(build) != nullptr;
+        // Accept exact match or patched clients
+        if (sRealmList->GetBuildInfo(build))
+            return true;
+        // Accept patched clients (build incremented by 1)
+        if (sRealmList->GetBuildInfo(build - 1))
+            return true;
+        return false;
     }
 };

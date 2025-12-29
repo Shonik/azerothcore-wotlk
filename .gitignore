@@ -102,3 +102,10 @@ local.properties
 #  !modules/yourmodule
 #
 # ==================
+
+# Patching system - compiled binaries
+tools/patch_installer/installer.exe
+tools/mpq_build/
+
+# Generated patch MPQs
+ClientPatches/*.mpq
